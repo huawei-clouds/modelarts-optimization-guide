@@ -75,8 +75,6 @@ model.compile(loss=keras.losses.categorical_crossentropy,
 
 ## horovod实现单机多卡
 
-左侧为线下单机单卡代码，右侧为线上单机多卡代码
-
 ```diff
 from keras.preprocessing.image import ImageDataGenerator
 from keras.optimizers import Adam
