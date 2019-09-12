@@ -75,144 +75,141 @@ model.compile(loss=keras.losses.categorical_crossentropy,
 
 ## horovod实现单机多卡
 
-左侧为线下单机单卡代码，右侧为线上单机多卡代码
+```diff
+from keras.preprocessing.image import ImageDataGenerator
+from keras.optimizers import Adam
+from sklearn.model_selection import train_test_split
+from keras.preprocessing.image import img_to_array
+from keras.utils import to_categorical
+from keras.preprocessing import image
+import keras
+import matplotlib.pyplot as plt
+import numpy as np
+import argparse
+import random
+import cv2
+import os
++ # set used gpu, here is 2 gpus
++ os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'
+import sys
++ from keras import backend as K
++ import tensorflow as tf
++ import horovod.keras as hvd
++ import random
+import moxing as mox
++ hvd.init()
++ config = tf.ConfigProto()
++ config.gpu_options.allow_growth = True
++ config.gpu_options.visible_device_list = str(hvd.local_rank())
++ rank: ' + str(hvd.local_rank()))
++ K.set_session(tf.Session(config=config))
+
+parser = argparse.ArgumentParser(description='Keras ImageNet Example',
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument('--data_url', default=os.path.expanduser('~/imagenet/train'),
+                    help='path to training data')
+parser.add_argument('--num_gpus', type=int, default=1,
+                    help='num of gpus to use')
+parser.add_argument('--log-dir', default='~/train_url/',
+                    help='tensorboard log directory')
+parser.add_argument('--checkpoint_format', default='/cache/checkpoint-{epoch}.h5',
+                    help='checkpoint file format')
+parser.add_argument('--train_url', default='/cache/weight.h5',
+                    help='weight file')
+# Default settings from https://arxiv.org/abs/1706.02677.
+parser.add_argument('--batch-size', type=int, default=32,
+                    help='input batch size for training')
+parser.add_argument('--val-batch-size', type=int, default=32,
+                    help='input batch size for validation')
+parser.add_argument('--epochs', type=int, default=10,
+                    help='number of epochs to train')
+parser.add_argument('--base-lr', type=float, default=0.01,
+                    help='learning rate for a single GPU')
+parser.add_argument('--warmup-epochs', type=float, default=5,
+                    help='number of warmup epochs')
+parser.add_argument('--momentum', type=float, default=0.9,
+                    help='SGD momentum')
+parser.add_argument('--wd', type=float, default=0.0001,
+                    help='weight decay')
+
+args = parser.parse_args()
+
+- mox.file.copy_parallel(args.data_url, '/cache/data/')
+- args.data_url = '/cache/data/'
++ hvd.init()
++ if hvd.local_rank() == 0:
++     mox.file.copy_parallel(args.data_url, '/cache/')
++ args.data_url = '/cache/'
++ hvd.allreduce([0], name="Barrier")
+
+resume_from_epoch = 0
+for try_epoch in range(args.epochs, 0, -1):
+    if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
+        resume_from_epoch = try_epoch
+        break
+
++ resume_from_epoch = hvd.broadcast(resume_from_epoch, 0, name='resume_from_epoch')
+
+# Training data iterator.
+train_gen = image.ImageDataGenerator(
+    width_shift_range=0.33, height_shift_range=0.33, zoom_range=0.5, horizontal_flip=True,
+    preprocessing_function=keras.applications.resnet50.preprocess_input)
+train_iter = train_gen.flow_from_directory(args.data_url,
+                                           batch_size=args.batch_size,
+                                           target_size=(224, 224))
 
 
+# Set up standard ResNet-50 model.
+base_model = keras.applications.resnet50.ResNet50(weights=None, include_top=False, pooling='avg')
+predictions = keras.layers.Dense(102, activation='softmax')(base_model.output)
+model = keras.models.Model(inputs=base_model.input, outputs=predictions)
 
-| 1    | from keras.preprocessing.image import ImageDataGenerator     | =    | 1    | from keras.preprocessing.image import ImageDataGenerator     |
-| ---- | ------------------------------------------------------------ | ---- | ---- | ------------------------------------------------------------ |
-| 2    | from keras.optimizers import Adam                            |      | 2    | from keras.optimizers import Adam                            |
-| 3    | from sklearn.model_selection import train_test_split         |      | 3    | from sklearn.model_selection import train_test_split         |
-| 4    | from keras.preprocessing.image import img_to_array           |      | 4    | from keras.preprocessing.image import img_to_array           |
-| 5    | from keras.utils import to_categorical                       |      | 5    | from keras.utils import to_categorical                       |
-| 6    | from keras.preprocessing import image                        |      | 6    | from keras.preprocessing import image                        |
-| 7    | import keras                                                 |      | 7    | import keras                                                 |
-| 8    | import numpy as np                                           |      | 8    | import numpy as np                                           |
-| 9    | import argparse                                              |      | 9    | import argparse                                              |
-| 10   | import random                                                |      | 10   | import random                                                |
-| 11   | import cv2                                                   |      | 11   | import cv2                                                   |
-| 12   | import os                                                    |      | 12   | import os                                                    |
-|      |                                                              | -+   | 13   | # set used gpu, here is 2 gpus                               |
-|      |                                                              |      | 14   | os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'                   |
-| 13   | import sys                                                   | =    | 15   | import sys                                                   |
-|      |                                                              | -+   | 16   | from keras import backend as K                               |
-|      |                                                              |      | 17   | import tensorflow as tf                                      |
-|      |                                                              |      | 18   | import horovod.keras as hvd                                  |
-|      |                                                              |      | 19   | import random                                                |
-| 14   | import moxing as mox                                         | =    | 20   | import moxing as mox                                         |
-|      |                                                              | -+   | 21   |                                                              |
-|      |                                                              |      | 22   | # Horovod: initialize Horovod.                               |
-|      |                                                              |      | 23   | hvd.init()                                                   |
-|      |                                                              |      | 24   |                                                              |
-|      |                                                              |      | 25   | # Horovod: pin GPU to be used to process local rank (one GPU per process) |
-|      |                                                              |      | 26   | config = tf.ConfigProto()                                    |
-|      |                                                              |      | 27   | config.gpu_options.allow_growth = True                       |
-|      |                                                              |      | 28   | config.gpu_options.visible_device_list = str(hvd.local_rank()) |
-|      |                                                              |      | 29   | print ('--------------------------- size: ' + str(hvd.size()) + ' -------------------- rank: ' + str(hvd.local_rank())) |
-|      |                                                              |      | 30   | K.set_session(tf.Session(config=config))                     |
-| 15   |                                                              | =    | 31   |                                                              |
-| 16   | parser = argparse.ArgumentParser(description='Keras ImageNet Example', |      | 32   | parser = argparse.ArgumentParser(description='Keras ImageNet Example', |
-| 17   | formatter_class=argparse.ArgumentDefaultsHelpFormatter)      |      | 33   | formatter_class=argparse.ArgumentDefaultsHelpFormatter)      |
-| 18   | parser.add_argument('--data_url', default=os.path.expanduser('~/imagenet/train'), |      | 34   | parser.add_argument('--data_url', default=os.path.expanduser('~/imagenet/train'), |
-| 19   | help='path to training data')                                |      | 35   | help='path to training data')                                |
-| 20   | parser.add_argument('--num_gpus', type=int, default=1,       |      | 36   | parser.add_argument('--num_gpus', type=int, default=1,       |
-| 21   | help='num of gpus to use')                                   |      | 37   | help='num of gpus to use')                                   |
-| 22   | parser.add_argument('--log-dir', default='~/train_url/',     |      | 38   | parser.add_argument('--log-dir', default='~/train_url/',     |
-| 23   | help='tensorboard log directory')                            |      | 39   | help='tensorboard log directory')                            |
-| 24   | parser.add_argument('--checkpoint_format', default='/cache/checkpoint-{epoch}.h5', |      | 40   | parser.add_argument('--checkpoint_format', default='/cache/checkpoint-{epoch}.h5', |
-| 25   | help='checkpoint file format')                               |      | 41   | help='checkpoint file format')                               |
-| 26   | parser.add_argument('--train_url', default='/cache/weight.h5', |      | 42   | parser.add_argument('--train_url', default='/cache/weight.h5', |
-| 27   | help='weight file')                                          |      | 43   | help='weight file')                                          |
-| 28   | parser.add_argument('--batch_size', type=int, default=32,    |      | 44   | parser.add_argument('--batch_size', type=int, default=32,    |
-| 29   | help='input batch size for training')                        |      | 45   | help='input batch size for training')                        |
-| 30   | parser.add_argument('--val_batch_size', type=int, default=32, |      | 46   | parser.add_argument('--val_batch_size', type=int, default=32, |
-| 31   | help='input batch size for validation')                      |      | 47   | help='input batch size for validation')                      |
-| 32   | parser.add_argument('--epochs', type=int, default=10,        |      | 48   | parser.add_argument('--epochs', type=int, default=10,        |
-| 33   | help='number of epochs to train')                            |      | 49   | help='number of epochs to train')                            |
-| 34   | parser.add_argument('--base-lr', type=float, default=0.01,   |      | 50   | parser.add_argument('--base-lr', type=float, default=0.01,   |
-| 35   | help='learning rate for a single GPU')                       |      | 51   | help='learning rate for a single GPU')                       |
-| 36   | parser.add_argument('--warmup-epochs', type=float, default=5, |      | 52   | parser.add_argument('--warmup-epochs', type=float, default=5, |
-| 37   | help='number of warmup epochs')                              |      | 53   | help='number of warmup epochs')                              |
-| 38   | parser.add_argument('--momentum', type=float, default=0.9,   |      | 54   | parser.add_argument('--momentum', type=float, default=0.9,   |
-| 39   | help='SGD momentum')                                         |      | 55   | help='SGD momentum')                                         |
-| 40   | parser.add_argument('--wd', type=float, default=0.0001,      |      | 56   | parser.add_argument('--wd', type=float, default=0.0001,      |
-| 41   | help='weight decay')                                         |      | 57   | help='weight decay')                                         |
-| 42   |                                                              |      | 58   |                                                              |
-| 43   | args = parser.parse_args()                                   |      | 59   | args = parser.parse_args()                                   |
-|      |                                                              | <>   | 60   |                                                              |
-|      |                                                              |      | 61   | # set rank0 to download data to local cache url              |
-|      |                                                              |      | 62   | if hvd.local_rank() == 0:                                    |
-| 44   | mox.file.copy_parallel(args.data_url, '/cache/data/')        |      | 63   | mox.file.copy_parallel(args.data_url, '/cache/')             |
-| 45   | args.data_url = '/cache/data/'                               |      | 64   | args.data_url = '/cache/'                                    |
-|      |                                                              |      | 65   | # broadcast to other rank that rank0 has finished copy       |
-|      |                                                              |      | 66   | hvd.allreduce([0], name="Barrier")                           |
-| 46   |                                                              | =    | 67   |                                                              |
-| 47   | resume_from_epoch = 0                                        |      | 68   | resume_from_epoch = 0                                        |
-| 48   | for try_epoch in range(args.epochs, 0, -1):                  |      | 69   | for try_epoch in range(args.epochs, 0, -1):                  |
-| 49   | if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)): |      | 70   | if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)): |
-| 50   | resume_from_epoch = try_epoch                                |      | 71   | resume_from_epoch = try_epoch                                |
-| 51   | break                                                        |      | 72   | break                                                        |
-|      |                                                              | -+   | 73   |                                                              |
-|      |                                                              |      | 74   | # Horovod: broadcast resume_from_epoch from rank 0 (which will have |
-|      |                                                              |      | 75   | # checkpoints) to other ranks.                               |
-|      |                                                              |      | 76   | resume_from_epoch = hvd.broadcast(resume_from_epoch, 0, name='resume_from_epoch') |
-| 52   |                                                              | =    | 77   |                                                              |
-| 53   | # Training data iterator.                                    |      | 78   | # Training data iterator.                                    |
-| 54   | train_gen = image.ImageDataGenerator(                        |      | 79   | train_gen = image.ImageDataGenerator(                        |
-| 55   | width_shift_range=0.33, height_shift_range=0.33, zoom_range=0.5, horizontal_flip=True, |      | 80   | width_shift_range=0.33, height_shift_range=0.33, zoom_range=0.5, horizontal_flip=True, |
-| 56   | preprocessing_function=keras.applications.resnet50.preprocess_input) |      | 81   | preprocessing_function=keras.applications.resnet50.preprocess_input) |
-| 57   | train_iter = train_gen.flow_from_directory(args.data_url,    |      | 82   | train_iter = train_gen.flow_from_directory(args.data_url,    |
-| 58   | batch_size=args.batch_size,                                  | <>   | 83   | batch_size=args.batch_size,                                  |
-| 59   | target_size=(224, 224))                                      |      | 84   | target_size=(224, 224))                                      |
-| 60   |                                                              | =    | 85   |                                                              |
-| 61   |                                                              |      | 86   |                                                              |
-| 62   | # Set up standard ResNet-50 model.                           |      | 87   | # Set up standard ResNet-50 model.                           |
-| 63   | base_model = keras.applications.resnet50.ResNet50(weights=None, include_top=False, pooling='avg') |      | 88   | base_model = keras.applications.resnet50.ResNet50(weights=None, include_top=False, pooling='avg') |
-| 64   | predictions = keras.layers.Dense(102, activation='softmax')(base_model.output) |      | 89   | predictions = keras.layers.Dense(102, activation='softmax')(base_model.output) |
-| 65   | model = keras.models.Model(inputs=base_model.input, outputs=predictions) |      | 90   | model = keras.models.Model(inputs=base_model.input, outputs=predictions) |
-| 66   |                                                              |      | 91   |                                                              |
-| 67   | model = keras.utils.multi_gpu_model(model, gpus=args.num_gpus) | +-   |      |                                                              |
-| 68   | opt = keras.optimizers.SGD(lr=args.base_lr, momentum=args.momentum) | =    | 92   | opt = keras.optimizers.SGD(lr=args.base_lr, momentum=args.momentum) |
-|      |                                                              | -+   | 93   |                                                              |
-|      |                                                              |      | 94   | # Horovod: add Horovod Distributed Optimizer.                |
-|      |                                                              |      | 95   | opt = hvd.DistributedOptimizer(opt)                          |
-| 69   |                                                              | =    | 96   |                                                              |
-| 70   | model.compile(loss=keras.losses.categorical_crossentropy,    |      | 97   | model.compile(loss=keras.losses.categorical_crossentropy,    |
-| 71   | optimizer=opt,                                               |      | 98   | optimizer=opt,                                               |
-| 72   | metrics=['accuracy', 'top_k_categorical_accuracy'])          |      | 99   | metrics=['accuracy', 'top_k_categorical_accuracy'])          |
-| 73   |                                                              |      | 100  |                                                              |
-|      |                                                              | <>   | 101  | callbacks = [                                                |
-|      |                                                              |      | 102  | # Horovod: broadcast initial variable states from rank 0 to all other processes. |
-|      |                                                              |      | 103  | # This is necessary to ensure consistent initialization of all workers when |
-|      |                                                              |      | 104  | # training is started with random weights or restored from a checkpoint. |
-|      |                                                              |      | 105  | hvd.callbacks.BroadcastGlobalVariablesCallback(0),           |
-|      |                                                              |      | 106  |                                                              |
-|      |                                                              |      | 107  | # Horovod: average metrics among workers at the end of every epoch. |
-|      |                                                              |      | 108  | #                                                            |
-|      |                                                              |      | 109  | # Note: This callback must be in the list before the ReduceLROnPlateau, |
-|      |                                                              |      | 110  | # TensorBoard, or other metrics-based callbacks.             |
-|      |                                                              |      | 111  | hvd.callbacks.MetricAverageCallback()]                       |
-|      |                                                              |      | 112  |                                                              |
-|      |                                                              |      | 113  | # set rank0 to save ModelCheckpoint to cache                 |
-|      |                                                              |      | 114  | if hvd.local_rank() == 0:                                    |
-| 74   | callbacks = [keras.callbacks.ModelCheckpoint(args.checkpoint_format), |      | 115  | callbacks.append(keras.callbacks.ModelCheckpoint(args.checkpoint_format)) |
-| 75   | keras.callbacks.TensorBoard(args.log_dir)]                   |      |      |                                                              |
-| 76   |                                                              |      | 116  | callbacks.append(keras.callbacks.TensorBoard(args.log_dir))  |
-| 77   |                                                              | =    | 117  |                                                              |
-| 78   | model.fit_generator(train_iter,                              |      | 118  | model.fit_generator(train_iter,                              |
-| 79   | steps_per_epoch=len(train_iter),                             |      | 119  | steps_per_epoch=len(train_iter),                             |
-| 80   | callbacks=callbacks,                                         |      | 120  | callbacks=callbacks,                                         |
-| 81   | epochs=args.epochs,                                          |      | 121  | epochs=args.epochs,                                          |
-| 82   | workers=4,                                                   |      | 122  | workers=4,                                                   |
-| 83   | initial_epoch=resume_from_epoch)                             |      | 123  | initial_epoch=resume_from_epoch)                             |
-|      |                                                              | <>   | 124  |                                                              |
-|      |                                                              |      | 125  | # set rank0 to save weight and move ckpt from cache to s3 url |
-| 84   |                                                              |      | 126  | if hvd.local_rank() == 0:                                    |
-| 85   | local_checkpoint_url = '/cache/checkpoint/'                  |      | 127  | local_checkpoint_url = '/cache/checkpoint/'                  |
-| 86   | if not mox.file.exists(local_checkpoint_url):                |      | 128  | if not mox.file.exists(local_checkpoint_url):                |
-| 87   | mox.file.mk_dir(local_checkpoint_url)                        |      | 129  | mox.file.mk_dir(local_checkpoint_url)                        |
-| 88   | model.save_weights(os.path.join(local_checkpoint_url, 'weight.h5')) |      | 130  | model.save_weights(os.path.join(local_checkpoint_url, 'weight.h5')) |
-| 89   | mox.file.copy_parallel(local_checkpoint_url, args.train_url) |      | 131  | mox.file.copy_parallel(local_checkpoint_url, args.train_url) |
+model = keras.utils.multi_gpu_model(model, gpus=args.num_gpus)
+opt = keras.optimizers.SGD(lr=args.base_lr, momentum=args.momentum)
++ opt = hvd.DistributedOptimizer(opt)
+
+model.compile(loss=keras.losses.categorical_crossentropy,
+              optimizer=opt,
+              metrics=['accuracy', 'top_k_categorical_accuracy'])
+
+- callbacks = [keras.callbacks.ModelCheckpoint(args.checkpoint_format),keras.callbacks.TensorBoard(args.log_dir)]
++ callbacks = [
++     # Horovod: broadcast initial variable states from rank 0 to all other processes.
++     # This is necessary to ensure consistent initialization of all workers when
++     # training is started with random weights or restored from a checkpoint.
++     hvd.callbacks.BroadcastGlobalVariablesCallback(0),
+
++     # Horovod: average metrics among workers at the end of every epoch.
++     #
++     # Note: This callback must be in the list before the ReduceLROnPlateau,
++     # TensorBoard, or other metrics-based callbacks.
++     hvd.callbacks.MetricAverageCallback()]
+
++ if hvd.local_rank() == 0:
++     callbacks.append(keras.callbacks.ModelCheckpoint(args.checkpoint_format))
++     callbacks.append(keras.callbacks.TensorBoard(args.log_dir))
+
+model.fit_generator(train_iter,
+              steps_per_epoch=len(train_iter),
+              callbacks=callbacks,
+              epochs=args.epochs,
+              workers=4,
+              initial_epoch=resume_from_epoch)
+
+- local_checkpoint_url = '/cache/checkpoint/'
+- if not mox.file.exists(local_checkpoint_url):
+-     mox.file.mk_dir(local_checkpoint_url)
+- model.save_weights(os.path.join(local_checkpoint_url, 'weight.h5'))
+- mox.file.copy_parallel(local_checkpoint_url, args.train_url)
++ if hvd.local_rank() == 0:
++     local_checkpoint_url = '/cache/checkpoint/'
++     if not mox.file.exists(local_checkpoint_url):
++         mox.file.mk_dir(local_checkpoint_url)
++     model.save_weights(os.path.join(local_checkpoint_url, 'weight.h5'))
++     mox.file.copy_parallel(local_checkpoint_url, args.train_url)
+```
+
+
 
 ## keras horovod读数据注意事项
 
