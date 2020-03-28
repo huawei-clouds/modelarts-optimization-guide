@@ -61,10 +61,20 @@ TensorFlow原生应用使用的是ResNet-50 的图像分类模型，其中CIFAR�
 - 在ModelArts上训练时需要在第一个进程下载数据，完成后所有进程同步运行：
 
   ```python
-  local_data_url = '/home/tcd/train_dir/data/'
+  from mpi4py import MPI
+  local_data_url = '/cache/data/'
   if hvd.local_rank() == 0:
-  	mox.file.copy_parallel(flags.data_url, local_data_url)
-  hvd._allreduce([0], name="Barrier")
+    mox.file.copy_parallel(flags.data_url, local_data_url)
+  MPI.COMM_WORLD.Barrier()
+  ```
+
+  ```python
+  from moxing.framework.util.runtime import mpi_local_sync_barrier
+  @mpi_local_sync_barrier()
+  def mpi_copy():
+    if hvd.local_rank() == 0:
+      mox.file.copy_parallel(flags.data_url, local_data_url)
+  mpi_copy()
   ```
 
 - **切分数据集**并分配给每个进程，每个进程使用不同的数据块，示例如下：
@@ -121,6 +131,7 @@ import tensorflow as tf
 import random
 import pickle
 + import time
++ from mpi4py import MPI
 + import horovod.tensorflow as hvd
 + import moxing.tensorflow as mox
 from tensorflow.contrib.slim import nets
@@ -220,7 +231,7 @@ if __name__ == '__main__':
 +   hvd.init()
 +   if hvd.local_rank() == 0:
 +       mox.file.copy_parallel(flags.data_url, '/cache/data/')
-+   hvd._allreduce([0], name="Barrier")
++   MPI.COMM_WORLD.Barrier()
     batch_size = 128
     num_classes = 10
     num_steps = 500
